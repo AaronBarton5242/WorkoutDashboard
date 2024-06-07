@@ -1,0 +1,225 @@
+---
+title: "STAT 345 Final Project - Work(out) Smarter"
+author: "Aaron Barton, Chase Tenner, Sean Hooyman, Lucas Zasada"
+date: "2024-05-4"
+output: word_document
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Load libraries
+```{r message=FALSE, include=FALSE}
+library(readxl)
+library(tidyverse)
+library(ggplot2)
+library(shinydashboard)
+library(shiny)
+library(lubridate)
+library(fmsb)
+library(stringr)
+```
+
+To upload new data, the coach would need to import the data and change the name to the new file name in the R code. They should keep variable names consistent to these files so everything works.
+```{r include=FALSE}
+# Import data
+data_updated = read_excel("Updated-Compiled_Data_Example.xlsx") 
+report = read.csv("Updated-RPE Report.csv")
+```
+
+Data cleaning and manipulation
+```{r include=FALSE}
+# Omit NA values
+data_updated = na.omit(data_updated)
+report = na.omit(report)
+
+#Summary for each activity
+activity_summary = report %>% select(-Date, -ID) %>% group_by(Activity.Type) %>% summarize(across(everything(), mean))
+
+# Remove categorical variables and summarize by player in regular dataset
+summarized_data = data_updated %>% select(-Test_Date, -TestNumber) %>% group_by(ID) %>% summarize(across(everything(), mean))
+
+# Remove categorical variables and summarize by player in report dataset
+summarized_report = report %>% select(-Date, -Activity.Type) %>% group_by(ID) %>% summarize(across(everything(), mean))
+
+# Summarized data by players with complete data
+joined_data = inner_join(summarized_data, summarized_report, by = "ID")
+# summary(joined_data)
+
+# bins weeks together
+report_weeks = report %>% mutate(Date_1 = as.Date(Date, format = "%m/%d/%Y")) %>% mutate(Week = floor_date(Date_1, unit = "week"))
+
+# summarizes by week and retains activity type and player ID
+summarized_activity_weeks = aggregate(sRPE ~ Week + Activity.Type, data = report_weeks, FUN = mean)
+summarized_player_weeks = aggregate(sRPE ~ Week + ID, data = report_weeks, FUN = mean)
+
+# averages the teams sRPE by week and combines it with the player's data
+summarized_team_weeks = summarized_player_weeks %>% group_by(Week) %>% summarize(weeklyTeamAve = mean(sRPE))
+summarized_player_weeks = inner_join(summarized_player_weeks, summarized_team_weeks, by = "Week")
+```
+
+
+
+Start by running all code and open the R with dashboard. Once opened, you can navigate between tabs by clicking on them depending on what metric you want to look at. Each tab has a drop down where you can search or select the option you want to be displayed in the graphic.
+
+first tab: weekly boxplots for the entire team filtered by the type of activity
+
+second tab: individual player analysis
+-metric card: shows the average sRPE for last week for the filtered player
+-bar and line chart: displays the weekly average sRPE with a line to compare to the overall team average
+-spider plot: allows players and coaches to monitor important metrics that are inversely related to exertion. The lower the metrics, the more evidence of exertion. The plot has 2 shapes. One showing the filtered players baseline, which is the players overall average for all recorded time. The other shape shows the players average for the last week (currently this is just simulated data with variance from the overall baseline average). The plot turns red if the metrics are too low, indicating exertion. The plot turns green if the metrics are within the accepted range of the baseline. The threshold can be changed in the code.
+
+```{r echo=FALSE, message = FALSE}
+# Dashboard code
+# Define UI
+
+ui <- dashboardPage(
+  dashboardHeader(title = "sRPE Dashboard"),
+  dashboardSidebar(
+    sidebarMenu(
+      menuItem("Activity Summary", tabName = "activity_summary", icon = icon("chart-bar")),
+      menuItem("Player Analysis", tabName = "player_analysis", icon = icon("user"))
+    )
+  ),
+  dashboardBody(
+    tabItems(
+      #first tab for team analysis
+      tabItem(tabName = "activity_summary",
+              fluidRow(
+                #dropdown for activity
+                box(selectInput("activity_select", "Select Activity:", choices = unique(report$Activity.Type)), width = 12),
+                box(plotOutput("activity_summary_plot"), width = 9)
+              )
+      ),
+      #second tab for player analysis
+      tabItem(tabName = "player_analysis",
+              fluidRow(
+                #dropdown for player ID
+                box(selectInput("player_id", "Select Player ID:", choices = sort(unique(report$ID))), width = 6), 
+                # metric card for average sRPE (last week)
+                valueBoxOutput("average_srpe_box")
+              ),
+              fluidRow(
+                # plot for players sRPE over time
+                box(plotOutput("srpe_by_player_plot"), width = 6),
+                # spider plot for monitoring exertion
+                box(plotOutput("exertion_measures_by_player_plot"), width = 6)
+              )
+      )
+    )
+  )
+)
+
+
+# Define server logic
+server <- function(input, output) {
+  # Render histogram based on selected activity
+  output$activity_summary_plot <- renderPlot({
+    req(input$activity_select)
+    filtered_report <- report_weeks %>% filter(Activity.Type %in% input$activity_select)
+    ggplot(filtered_report, aes(x = Week, y = sRPE)) + geom_boxplot(aes(group = Week), fill = "royalblue") +
+      labs(title = paste("Weekly Boxplots of sRPE for", paste(input$activity_select, collapse = ", "))) +
+      xlab("Date") + ylab("sRPE")+
+      theme(plot.title = element_text(face = "bold"))
+
+  })
+
+  # Render sRPE plot for the specified player ID
+  output$srpe_by_player_plot <- renderPlot({
+    req(input$player_id)
+    # filter by player ID
+    report_filtered <- summarized_player_weeks %>% filter(ID == as.numeric(input$player_id))
+    ggplot(report_filtered, aes(x = Week, y = sRPE)) + geom_col(fill = "seagreen") + 
+      geom_line(data = report_filtered, aes(x = Week, y = weeklyTeamAve, color = "firebrick"), size = 1) +
+      labs(title = paste("Weekly Perceived Exertion Averages for Player ID", input$player_id)) +
+      scale_color_manual(values = "firebrick", labels = "Weekly Team Average", name = "") +
+      xlab("Date") + ylab("sRPE")+
+      theme(plot.title = element_text(face = "bold"))
+
+  })
+  
+  # Render exertion measures plot for the specified player ID
+  output$exertion_measures_by_player_plot <- renderPlot({
+    req(input$player_id)
+    # select ID and relative exertion metrics
+    variables <- c("ID", "Relative Force at Min Displacement", "IMTP", "MAS_Ave(mph)", "Fast_Reaction")
+    spider_data <- joined_data %>% select(all_of(variables)) %>% select(-ID)
+    # calculate min and max values of each variable for scaling the spider plot
+    max_values <- apply(spider_data, 2, max)
+    min_values <- apply(spider_data, 2, min)
+    
+    # get individual data for filtered player
+    data_individual <- joined_data %>%
+      select(all_of(variables)) %>%
+      filter(ID == as.numeric(input$player_id)) %>%
+      select(-ID)
+  
+    data_individual <- rbind(min_values, data_individual)
+    data_individual <- rbind(max_values, data_individual)
+    
+    # make simulated data for new week
+    new_data_individual <- data_individual %>%
+      slice(3)
+    normal_variation <- rnorm(n = ncol(new_data_individual), mean = 0, sd = 0.5)
+    new_data_individual <- new_data_individual + normal_variation
+    new_data_individual <- rbind(min_values, new_data_individual)
+    new_data_individual <- rbind(max_values, new_data_individual)
+    
+    #scaling the shapes
+    student_overall_avg <- data_individual %>%
+      slice(3)
+    new_weekly_avg <- new_data_individual %>%
+      slice(3)
+    new_data_individual <- rbind(new_data_individual, student_overall_avg)
+    
+    
+    # Threshold is permissable range that new week average can go below the baseline before setting off red alert.
+    threshold <- 0.01
+    newcolor <- ifelse(any(new_weekly_avg > student_overall_avg - threshold), "green", "red")
+    color <- c(newcolor, "grey")
+    
+    radarchart(new_data_individual,
+               plty = 3,
+               pcol = "#636363",
+               plwd = 2,
+               pfcol = scales::alpha(color, 0.8), # translucent colors
+               cglty = 1,
+               cglcol = "#3b3b3b",
+               title = str_wrap("Monitoring Key Metrics of Exertion (Player Baseline Average vs. Average for Last Week)", width = 50),
+               vlcex = 1)
+    
+    legend("bottomright", legend = c("Out of Safe Range", "In Safe Range"),
+           fill = c("red", "green"), title = "Legend")
+  })
+  
+  
+  
+
+ # Render average sRPE for the latest week for the selected player
+  output$average_srpe_box <- renderInfoBox({
+    
+    req(input$player_id)
+    # get the latest week average for the filtered player
+    latest_week_avg <- summarized_player_weeks %>%
+      filter(ID == as.numeric(input$player_id)) %>%
+      arrange(desc(Week)) %>%
+      slice(1) %>%
+      pull(sRPE)  # Extracting the average sRPE for the latest week
+    
+valueBox(
+    subtitle = "Last Week's Average sRPE", 
+    value = latest_week_avg,
+    color = "light-blue",
+    width = 30)
+    
+    })
+
+}
+
+# Run the application
+shinyApp(ui, server)
+
+```
+
